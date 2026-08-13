@@ -2,6 +2,10 @@
 
 An asynchronous, colorized PowerShell audio extraction and DSP pipeline powered by `yt-dlp` and `ffmpeg`.
 
+## Lookat
+
+[!resources/test1.png](Gave Up)
+
 ## Overview
 
 `yget.ps1` downloads audio streams from YouTube URLs, extracts high-quality WAV files, and applies real-time DSP audio filters (pitch modulation, vibrato, flanger, tremolo, phase reversal) with smooth non-blocking terminal spinners.

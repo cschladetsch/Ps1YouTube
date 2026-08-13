@@ -149,8 +149,8 @@ try {
     }
 
     # 1. Metadata Extraction
-    $rawTitle = Invoke-WithSpinner -Executable "yt-dlp" -Arguments "--get-title --no-playlist --no-warnings ""$Url""" -Message "Extracting metadata via yt-dlp..."
-    if (-not $rawTitle) { $rawTitle = "Audio_$id" }
+    if (-not $rawTitle) { $rawTitle = "Audio_$id" [void](Invoke-WithSpinner -Executable "yt-dlp" -Arguments "-q --no-playlist --no-part --no-warnings --cookies-from-browser chrome -f ""ba/b"" -x --audio-format wav -o ""$tempRaw"" ""$Url""" -Message "Downloading raw WAV stream...")
+	    }
 
     $rawTitle = ($rawTitle -split "`r?\n")[0]
     $safeTitle = $rawTitle -replace '[\\/:*?"<>|]', '_'
