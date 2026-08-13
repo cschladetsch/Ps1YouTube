@@ -9,11 +9,15 @@ param(
     [switch]$Reverse
 )
 
-# Safe initializations (Strict Mode safe)
+$ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
+
+# Safe initializations
 $tempRaw   = $null
 $tempOut   = $null
 $id        = [guid]::NewGuid().ToString().Substring(0, 8)
 $tempDir   = [System.IO.Path]::GetTempPath()
+$outputDir = Join-Path (Get-Location) "output"
 
 # Color Logging Helpers
 function Write-Status  { param([string]$Message) Write-Host "[*] " -ForegroundColor Cyan -NoNewline; Write-Host $Message -ForegroundColor White }
@@ -21,7 +25,7 @@ function Write-Success { param([string]$Message) Write-Host "[+] " -ForegroundCo
 function Write-Warn    { param([string]$Message) Write-Host "[!] " -ForegroundColor Yellow -NoNewline; Write-Host $Message -ForegroundColor White }
 function Write-Err     { param([string]$Message) Write-Host "[-] " -ForegroundColor Red -NoNewline; Write-Host $Message -ForegroundColor White }
 
-# Async Spinner Runner with Non-Blocking Event-Driven Pipe Draining
+# Thread-safe Process Runner with Terminal Spinner
 function Invoke-WithSpinner {
     param(
         [string]$Executable,
@@ -42,20 +46,11 @@ function Invoke-WithSpinner {
     $process = New-Object System.Diagnostics.Process
     $process.StartInfo = $pinfo
 
-    $stdOutBuilder = [System.Text.StringBuilder]::new()
-    $stdErrBuilder = [System.Text.StringBuilder]::new()
-
-    $process.add_OutputDataReceived({
-        if ($EventArgs.Data) { [void]$stdOutBuilder.AppendLine($EventArgs.Data) }
-    })
-    $process.add_ErrorDataReceived({
-        if ($EventArgs.Data) { [void]$stdErrBuilder.AppendLine($EventArgs.Data) }
-    })
-
     try {
         [void]$process.Start()
-        $process.BeginOutputReadLine()
-        $process.BeginErrorReadLine()
+
+        $stdOutTask = $process.StandardOutput.ReadToEndAsync()
+        $stdErrTask = $process.StandardError.ReadToEndAsync()
 
         $i = 0
         while (-not $process.HasExited) {
@@ -67,11 +62,12 @@ function Invoke-WithSpinner {
         }
 
         $process.WaitForExit()
+        [System.Threading.Tasks.Task]::WaitAll(@($stdOutTask, $stdErrTask))
 
         Write-Host -NoNewline ("`r" + " " * ($Message.Length + 10) + "`r")
 
-        $stdout = $stdOutBuilder.ToString().Trim()
-        $stderr = $stdErrBuilder.ToString().Trim()
+        $stdout = $stdOutTask.Result.Trim()
+        $stderr = $stdErrTask.Result.Trim()
 
         if ($process.ExitCode -ne 0) {
             throw "Process '$Executable' failed with exit code $($process.ExitCode): $stderr"
@@ -85,10 +81,16 @@ function Invoke-WithSpinner {
 }
 
 try {
+    # Ensure local output directory exists
+    if (-not (Test-Path $outputDir)) {
+        New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
+    }
+
     # 1. Metadata Extraction
     $rawTitle = Invoke-WithSpinner -Executable "yt-dlp" -Arguments "--get-title --no-playlist --no-warnings ""$Url""" -Message "Extracting metadata via yt-dlp..."
     if (-not $rawTitle) { $rawTitle = "Audio_$id" }
-    
+
+    $rawTitle = ($rawTitle -split "`r?\n")[0]
     $safeTitle = $rawTitle -replace '[\\/:*?"<>|]', '_'
     Write-Success "Target: $rawTitle"
 
@@ -96,7 +98,7 @@ try {
     $tempOut = Join-Path $tempDir "yget_out_${id}.wav"
 
     # 2. Download Raw WAV Stream
-    [void](Invoke-WithSpinner -Executable "yt-dlp" -Arguments "-q --no-playlist --no-part --no-warnings -x --audio-format wav -o ""$tempRaw"" ""$Url""" -Message "Downloading raw WAV stream...")
+    [void](Invoke-WithSpinner -Executable "yt-dlp" -Arguments "-q --no-playlist --no-part --no-warnings -f ""ba/b"" -x --audio-format wav -o ""$tempRaw"" ""$Url""" -Message "Downloading raw WAV stream...")
 
     if (-not ($tempRaw -and (Test-Path $tempRaw))) {
         throw "Download failed or output file was not generated."
@@ -110,7 +112,7 @@ try {
     if ($Pulsate) { Write-Status "DSP: Pulsate (Tremolo LFO)"; $filters.Add("tremolo=f=4.0:d=0.7") }
     if ($Reverse) { Write-Status "DSP: Reverse (Phase Reversal)"; $filters.Add("areverse") }
 
-    $finalDestination = Join-Path (Get-Location) "${safeTitle}.wav"
+    $finalDestination = Join-Path $outputDir "${safeTitle}.wav"
 
     if ($filters.Count -gt 0) {
         $filterGraph = $filters -join ","

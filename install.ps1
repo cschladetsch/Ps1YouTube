@@ -40,7 +40,23 @@ if (-not (Test-Path "example")) {
     New-Item -ItemType Directory -Force -Path "example" | Out-Null
 }
 
-# 4. Generate yget.ps1
+# 4. Configure .gitignore
+Write-Host "[*] Updating .gitignore..." -ForegroundColor Cyan
+$gitignorePath = ".gitignore"
+$ignoreEntries = @("output/", "*.wav")
+
+if (Test-Path $gitignorePath) {
+    $existingContent = Get-Content $gitignorePath
+    foreach ($entry in $ignoreEntries) {
+        if ($existingContent -notcontains $entry) {
+            Add-Content -Path $gitignorePath -Value $entry
+        }
+    }
+} else {
+    Set-Content -Path $gitignorePath -Value ($ignoreEntries -join [Environment]::NewLine) -Encoding UTF8
+}
+
+# 5. Generate yget.ps1
 Write-Host "[*] Writing yget.ps1..." -ForegroundColor Cyan
 $ygetScript = @'
 [CmdletBinding()]
@@ -54,11 +70,15 @@ param(
     [switch]$Reverse
 )
 
-# Safe initializations (Strict Mode safe)
+$ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
+
+# Safe initializations
 $tempRaw   = $null
 $tempOut   = $null
 $id        = [guid]::NewGuid().ToString().Substring(0, 8)
 $tempDir   = [System.IO.Path]::GetTempPath()
+$outputDir = Join-Path (Get-Location) "output"
 
 # Color Logging Helpers
 function Write-Status  { param([string]$Message) Write-Host "[*] " -ForegroundColor Cyan -NoNewline; Write-Host $Message -ForegroundColor White }
@@ -66,7 +86,7 @@ function Write-Success { param([string]$Message) Write-Host "[+] " -ForegroundCo
 function Write-Warn    { param([string]$Message) Write-Host "[!] " -ForegroundColor Yellow -NoNewline; Write-Host $Message -ForegroundColor White }
 function Write-Err     { param([string]$Message) Write-Host "[-] " -ForegroundColor Red -NoNewline; Write-Host $Message -ForegroundColor White }
 
-# Async Spinner Runner with Non-Blocking Event-Driven Pipe Draining
+# Thread-safe Process Runner with Terminal Spinner
 function Invoke-WithSpinner {
     param(
         [string]$Executable,
@@ -87,20 +107,11 @@ function Invoke-WithSpinner {
     $process = New-Object System.Diagnostics.Process
     $process.StartInfo = $pinfo
 
-    $stdOutBuilder = [System.Text.StringBuilder]::new()
-    $stdErrBuilder = [System.Text.StringBuilder]::new()
-
-    $process.add_OutputDataReceived({
-        if ($EventArgs.Data) { [void]$stdOutBuilder.AppendLine($EventArgs.Data) }
-    })
-    $process.add_ErrorDataReceived({
-        if ($EventArgs.Data) { [void]$stdErrBuilder.AppendLine($EventArgs.Data) }
-    })
-
     try {
         [void]$process.Start()
-        $process.BeginOutputReadLine()
-        $process.BeginErrorReadLine()
+
+        $stdOutTask = $process.StandardOutput.ReadToEndAsync()
+        $stdErrTask = $process.StandardError.ReadToEndAsync()
 
         $i = 0
         while (-not $process.HasExited) {
@@ -112,11 +123,12 @@ function Invoke-WithSpinner {
         }
 
         $process.WaitForExit()
+        [System.Threading.Tasks.Task]::WaitAll(@($stdOutTask, $stdErrTask))
 
         Write-Host -NoNewline ("`r" + " " * ($Message.Length + 10) + "`r")
 
-        $stdout = $stdOutBuilder.ToString().Trim()
-        $stderr = $stdErrBuilder.ToString().Trim()
+        $stdout = $stdOutTask.Result.Trim()
+        $stderr = $stdErrTask.Result.Trim()
 
         if ($process.ExitCode -ne 0) {
             throw "Process '$Executable' failed with exit code $($process.ExitCode): $stderr"
@@ -130,10 +142,16 @@ function Invoke-WithSpinner {
 }
 
 try {
+    # Ensure local output directory exists
+    if (-not (Test-Path $outputDir)) {
+        New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
+    }
+
     # 1. Metadata Extraction
     $rawTitle = Invoke-WithSpinner -Executable "yt-dlp" -Arguments "--get-title --no-playlist --no-warnings ""$Url""" -Message "Extracting metadata via yt-dlp..."
     if (-not $rawTitle) { $rawTitle = "Audio_$id" }
-    
+
+    $rawTitle = ($rawTitle -split "`r?\n")[0]
     $safeTitle = $rawTitle -replace '[\\/:*?"<>|]', '_'
     Write-Success "Target: $rawTitle"
 
@@ -141,7 +159,7 @@ try {
     $tempOut = Join-Path $tempDir "yget_out_${id}.wav"
 
     # 2. Download Raw WAV Stream
-    [void](Invoke-WithSpinner -Executable "yt-dlp" -Arguments "-q --no-playlist --no-part --no-warnings -x --audio-format wav -o ""$tempRaw"" ""$Url""" -Message "Downloading raw WAV stream...")
+    [void](Invoke-WithSpinner -Executable "yt-dlp" -Arguments "-q --no-playlist --no-part --no-warnings -f ""ba/b"" -x --audio-format wav -o ""$tempRaw"" ""$Url""" -Message "Downloading raw WAV stream...")
 
     if (-not ($tempRaw -and (Test-Path $tempRaw))) {
         throw "Download failed or output file was not generated."
@@ -155,7 +173,7 @@ try {
     if ($Pulsate) { Write-Status "DSP: Pulsate (Tremolo LFO)"; $filters.Add("tremolo=f=4.0:d=0.7") }
     if ($Reverse) { Write-Status "DSP: Reverse (Phase Reversal)"; $filters.Add("areverse") }
 
-    $finalDestination = Join-Path (Get-Location) "${safeTitle}.wav"
+    $finalDestination = Join-Path $outputDir "${safeTitle}.wav"
 
     if ($filters.Count -gt 0) {
         $filterGraph = $filters -join ","
@@ -196,7 +214,7 @@ try {
 
 Set-Content -Path "yget.ps1" -Value $ygetScript -Encoding UTF8
 
-# 5. Generate README.md
+# 6. Generate README.md
 Write-Host "[*] Writing README.md..." -ForegroundColor Cyan
 
 $readmeLines = @(
@@ -206,11 +224,12 @@ $readmeLines = @(
     '',
     '## Overview',
     '',
-    '`yget.ps1` downloads audio streams from YouTube URLs, extracts high-quality WAV files, and applies real-time DSP audio filters (pitch modulation, vibrato, flanger, tremolo, phase reversal) with smooth non-blocking terminal spinners.',
+    '`yget.ps1` downloads audio streams from YouTube URLs, extracts high-quality WAV files to the local `output/` directory, and applies real-time DSP audio filters (pitch modulation, vibrato, flanger, tremolo, phase reversal) with smooth non-blocking terminal spinners.',
     '',
     '## Key Features',
     '',
-    '- **Asynchronous Terminal Spinner**: Direct `.NET` process event handlers stream process pipes without pipeline buffer deadlocks.',
+    '- **Asynchronous Terminal Spinner**: Direct `.NET` task stream readers bypass runspace deadlocks.',
+    '- **Isolated Audio Output**: Renders automatically output to `output/` (ignored by Git).',
     '- **Colorized Output**: Standard console indicators (`[*]`, `[+]`, `[!]`, `[-]`).',
     '- **Handle Safety**: Explicit process handle disposal and retry loops in `finally` blocks prevent stream locking.',
     '- **DSP Audio Filter Chain**:',
@@ -230,8 +249,8 @@ $readmeLines = @(
     '    E --> F{DSP Switches Provided?}',
     '    F -- Yes --> G[Build FFmpeg Filter Graph]',
     '    G --> H[Invoke-WithSpinner: ffmpeg Filter Pipeline]',
-    '    H --> I[Move Filtered File to Final Destination]',
-    '    F -- No --> J[Move Raw WAV File to Final Destination]',
+    '    H --> I[Move Filtered File to output/ Destination]',
+    '    F -- No --> J[Move Raw WAV File to output/ Destination]',
     '    I --> K[Finally Block: Temp File Cleanup with Retries]',
     '    J --> K',
     '```'
