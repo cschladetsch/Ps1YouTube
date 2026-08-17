@@ -2,11 +2,9 @@
 
 An asynchronous, colorized PowerShell audio extraction and DSP pipeline powered by `yt-dlp` and `ffmpeg`.
 
-## LooAt
+## LookAt
 
-![Image](resources/Untitled.jpg)
-
-Image.
+![Image]Imagaes/Utitlked.png]
 
 ## Overview
 
