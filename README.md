@@ -4,7 +4,7 @@ An asynchronous, colorized PowerShell audio extraction and DSP pipeline powered 
 
 ## LookAt
 
-![Image]Imagaes/Utitlked.png]
+![Image](Images/Untitled.png]
 
 ## Overview
 
